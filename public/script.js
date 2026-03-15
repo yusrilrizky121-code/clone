@@ -312,21 +312,55 @@ async function fetchAndRender(query, containerId, formatType, isArtist = false, 
     } catch (error) {}
 }
 
-function loadHomeData() {
+async function loadHomeData() {
     homeDisplayedVideoIds.clear();
-    
-    fetchAndRender('lagu indonesia hits terbaru', 'recentList', 'list', false, true);
-    fetchAndRender('lagu pop indonesia rilis terbaru anyar', 'rowAnyar', 'card', false, true);
-    fetchAndRender('lagu ceria gembira semangat', 'rowGembira', 'card', false, true);
-    fetchAndRender('top 50 indonesia playlist update', 'rowCharts', 'card', false, true);
-    fetchAndRender('lagu galau sedih indonesia terpopuler', 'rowGalau', 'card', false, true);
-    fetchAndRender('lagu viral terbaru 2026', 'rowBaru', 'card', false, true);
-    fetchAndRender('lagu fyp tiktok viral jedag jedug', 'rowTiktok', 'card', false, true);
-    fetchAndRender('penyanyi pop indonesia paling hits', 'rowArtists', 'card', true, true);
-    
-    fetchAndRender('hit terpopuler hari ini', 'rowHitsHariIni', 'card', false, true);
-    fetchAndRender('playlist dibuat untuk tiktok', 'rowUntukTiktok', 'card', false, true);
-    fetchAndRender('album dan single populer', 'rowAlbumSingle', 'card', false, true);
+
+    // Tampilkan loading dulu
+    document.getElementById('recentList').innerHTML = '<div style="color:#a7a7a7; font-size:13px;">Memuat data...</div>';
+
+    try {
+        const response = await fetch('/api/home');
+        const result = await response.json();
+
+        if (result.status === 'success' && result.data.length > 0) {
+            // Section pertama → recentList (list format)
+            const firstSection = result.data[0];
+            let listHtml = '';
+            firstSection.items.slice(0, 4).forEach(t => {
+                if (!homeDisplayedVideoIds.has(t.videoId)) {
+                    listHtml += createListHTML(t);
+                    homeDisplayedVideoIds.add(t.videoId);
+                }
+            });
+            document.getElementById('recentList').innerHTML = listHtml || '<div style="color:#a7a7a7;">Tidak ada data</div>';
+
+            // Section berikutnya → row carousel
+            const rowIds = ['rowAnyar','rowGembira','rowCharts','rowGalau','rowBaru','rowTiktok','rowArtists','rowHitsHariIni','rowUntukTiktok','rowAlbumSingle'];
+            result.data.slice(1).forEach((section, i) => {
+                const containerId = rowIds[i];
+                if (!containerId) return;
+                const el = document.getElementById(containerId);
+                if (!el) return;
+                // Update section title
+                const titles = el.closest('.section-container')?.querySelector('.section-title');
+                if (titles) titles.textContent = section.title;
+                let html = '';
+                section.items.slice(0, 8).forEach(t => {
+                    if (!homeDisplayedVideoIds.has(t.videoId)) {
+                        html += createCardHTML(t, containerId === 'rowArtists');
+                        homeDisplayedVideoIds.add(t.videoId);
+                    }
+                });
+                el.innerHTML = html;
+            });
+        } else {
+            // Fallback ke search query kalau /api/home gagal
+            document.getElementById('recentList').innerHTML = '<div style="color:#a7a7a7;">Gagal memuat. Coba refresh.</div>';
+        }
+    } catch (error) {
+        console.error('loadHomeData error:', error);
+        document.getElementById('recentList').innerHTML = '<div style="color:#a7a7a7;">Gagal memuat data.</div>';
+    }
 }
 
 function renderSearchCategories() {

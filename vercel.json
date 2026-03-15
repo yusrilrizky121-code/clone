@@ -1,6 +1,7 @@
 {
   "version": 2,
+  "outputDirectory": "public",
   "rewrites": [
-    { "source": "/(.*)", "destination": "/api/index.py" }
+    { "source": "/api/:path*", "destination": "/api/index.py" }
   ]
 }
