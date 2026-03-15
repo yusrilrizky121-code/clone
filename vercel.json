@@ -4,7 +4,10 @@
     {
       "src": "api/index.py",
       "use": "@vercel/python",
-      "config": { "maxLambdaSize": "50mb" }
+      "config": {
+        "maxLambdaSize": "50mb",
+        "maxDuration": 60
+      }
     },
     {
       "src": "public/**",
@@ -14,8 +17,7 @@
   "routes": [
     {
       "src": "/api/(.*)",
-      "dest": "/api/index.py",
-      "headers": { "x-vercel-function-timeout": "60" }
+      "dest": "/api/index.py"
     },
     {
       "src": "/",
@@ -29,10 +31,5 @@
       "src": "/(.*)",
       "dest": "/public/index.html"
     }
-  ],
-  "functions": {
-    "api/index.py": {
-      "maxDuration": 60
-    }
-  }
+  ]
 }
