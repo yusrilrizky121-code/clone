@@ -1,15 +1,7 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from mangum import Mangum
 import requests
-import time
+from http.server import BaseHTTPRequestHandler
 import json
-
-app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-
-home_cache = {}
-CACHE_TTL = 1800
+import urllib.parse
 
 HEADERS = {
     "Content-Type": "application/json",
@@ -18,125 +10,98 @@ HEADERS = {
     "X-YouTube-Client-Version": "19.09.37",
 }
 
-def innertube_context():
-    return {
-        "client": {
-            "clientName": "ANDROID",
-            "clientVersion": "19.09.37",
-            "androidSdkVersion": 30,
-            "hl": "id",
-            "gl": "ID"
-        }
+def get_stream(video_id):
+    body = {
+        "context": {
+            "client": {
+                "clientName": "ANDROID",
+                "clientVersion": "19.09.37",
+                "androidSdkVersion": 30,
+                "hl": "en",
+                "gl": "US"
+            }
+        },
+        "videoId": video_id,
+        "contentCheckOk": True,
+        "racyCheckOk": True
     }
+    r = requests.post(
+        "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+        headers=HEADERS,
+        json=body,
+        timeout=20
+    )
+    data = r.json()
+    status = data.get("playabilityStatus", {}).get("status", "UNKNOWN")
+    if status != "OK":
+        return None, f"playability={status}"
 
-def format_results(search_results):
-    cleaned = []
-    for item in search_results:
-        if 'videoId' in item:
-            cleaned.append({
-                "videoId": item['videoId'],
-                "title": item.get('title', 'Unknown'),
-                "artist": item.get('artists', [{'name': 'Unknown'}])[0]['name'] if item.get('artists') else 'Unknown',
-                "thumbnail": item['thumbnails'][-1]['url'] if item.get('thumbnails') else ''
-            })
-    return cleaned
+    sd = data.get("streamingData", {})
+    formats = sd.get("adaptiveFormats", []) + sd.get("formats", [])
+    audio = [f for f in formats
+             if f.get("mimeType", "").startswith("audio/")
+             and f.get("url")
+             and not f.get("signatureCipher")
+             and not f.get("cipher")]
 
-@app.get("/api/stream")
-def get_stream_url(videoId: str):
-    try:
-        body = {
-            "context": innertube_context(),
-            "videoId": videoId,
-            "contentCheckOk": True,
-            "racyCheckOk": True
-        }
-        r = requests.post(
-            "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
-            headers=HEADERS,
-            json=body,
-            timeout=20
-        )
-        data = r.json()
-        status = data.get("playabilityStatus", {}).get("status")
-        if status != "OK":
-            return {"status": "error", "message": f"playability: {status}"}
+    if not audio:
+        return None, "no direct audio"
 
-        sd = data.get("streamingData", {})
-        formats = sd.get("adaptiveFormats", []) + sd.get("formats", [])
+    best = next((f for f in audio if f.get("itag") == 140), None)
+    if not best:
+        best = max(audio, key=lambda f: f.get("bitrate", 0))
+    return best["url"], None
 
-        # Cari audio direct URL (tanpa cipher)
-        audio = [f for f in formats
-                 if f.get("mimeType", "").startswith("audio/")
-                 and f.get("url")
-                 and not f.get("signatureCipher")
-                 and not f.get("cipher")]
 
-        if not audio:
-            return {"status": "error", "message": "no direct audio url"}
+class handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        params = urllib.parse.parse_qs(parsed.query)
 
-        # Pilih itag 140 (m4a 128k) atau bitrate tertinggi
-        best = next((f for f in audio if f.get("itag") == 140), None)
-        if not best:
-            best = max(audio, key=lambda f: f.get("bitrate", 0))
+        if parsed.path == "/api/stream":
+            video_id = params.get("videoId", [None])[0]
+            if not video_id:
+                self._json(400, {"status": "error", "message": "videoId required"})
+                return
+            try:
+                url, err = get_stream(video_id)
+                if url:
+                    self._json(200, {"status": "success", "url": url})
+                else:
+                    self._json(200, {"status": "error", "message": err})
+            except Exception as e:
+                self._json(500, {"status": "error", "message": str(e)})
 
-        return {"status": "success", "url": best["url"]}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+        elif parsed.path == "/api/search":
+            query = params.get("query", [None])[0]
+            if not query:
+                self._json(400, {"status": "error", "message": "query required"})
+                return
+            try:
+                from ytmusicapi import YTMusic
+                results = YTMusic().search(query, filter="songs", limit=12)
+                data = [{"videoId": i["videoId"], "title": i.get("title",""), 
+                         "artist": i.get("artists",[{}])[0].get("name","") if i.get("artists") else "",
+                         "thumbnail": i["thumbnails"][-1]["url"] if i.get("thumbnails") else ""}
+                        for i in results if i.get("videoId")]
+                self._json(200, {"status": "success", "data": data})
+            except Exception as e:
+                self._json(500, {"status": "error", "message": str(e)})
 
-@app.get("/api/search")
-def search_music(query: str):
-    try:
-        from ytmusicapi import YTMusic
-        ytmusic = YTMusic()
-        results = ytmusic.search(query, filter="songs", limit=12)
-        return {"status": "success", "data": format_results(results)}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+        elif parsed.path == "/":
+            self._json(200, {"status": "ok", "message": "Auspoty API"})
 
-@app.get("/api/home")
-def get_home_data():
-    current_time = time.time()
-    if "data" in home_cache and (current_time - home_cache.get("timestamp", 0) < CACHE_TTL):
-        return {"status": "success", "data": home_cache["data"]}
-    try:
-        from ytmusicapi import YTMusic
-        ytmusic = YTMusic()
-        queries = {
-            "recent":  "lagu indonesia hits terbaru",
-            "anyar":   "lagu pop indonesia rilis terbaru anyar",
-            "gembira": "lagu ceria gembira semangat",
-            "charts":  "top 50 indonesia playlist update",
-            "galau":   "lagu galau sedih indonesia terpopuler",
-            "baru":    "lagu viral terbaru 2026",
-            "tiktok":  "lagu fyp tiktok viral jedag jedug",
-            "artists": "penyanyi pop indonesia paling hits",
-        }
-        data = {k: format_results(ytmusic.search(v, filter="songs", limit=8)) for k, v in queries.items()}
-        home_cache["data"] = data
-        home_cache["timestamp"] = current_time
-        return {"status": "success", "data": data}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+        else:
+            self._json(404, {"status": "error", "message": "not found"})
 
-@app.get("/api/lyrics")
-def get_lyrics(video_id: str):
-    try:
-        from ytmusicapi import YTMusic
-        ytmusic = YTMusic()
-        watch = ytmusic.get_watch_playlist(video_id)
-        lyrics_id = watch.get("lyrics")
-        if not lyrics_id:
-            return {"status": "error", "message": "No lyrics found"}
-        lyrics = ytmusic.get_lyrics(lyrics_id)
-        text = lyrics.get("lyrics", "")
-        if not text:
-            return {"status": "error", "message": "Empty lyrics"}
-        return {"status": "success", "data": {"lyrics": text}}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    def _json(self, code, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
-@app.get("/")
-def root():
-    return {"status": "ok", "message": "Auspoty Music API v2"}
-
-handler = Mangum(app)
+    def log_message(self, *args):
+        pass
